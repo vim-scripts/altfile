@@ -1,12 +1,21 @@
-" Title: AltFile 0.1 (initial release)
-" Date: 2008-02-16
+" Title: AltFile 0.1a
+" Date: 2008-02-17
 " Author: Alex Kunin <alexkunin@gmail.com>
 "
 "
 " PURPOSE
 " ===================================================================
 " The plugin allows to switch easily between file.h/file.c,
-" main source/testcase, " etc.
+" main source/testcase, etc.
+"
+" HISTORY
+" ===================================================================
+"
+" 2008-02-17    0.1a    When GUI is available, dialog forced
+"                       to be console-friendly, i.e. no GUI
+"                       window is poping up.
+"
+" 2008-02-16    0.1     Initial release.
 "
 "
 " INSTALLATION
@@ -173,11 +182,18 @@ function AltFile()
     endwhile
 
     try
+        if has("gui_running")
+            let guioptions = getbufvar('', '&guioptions')
+            setlocal guioptions+=c
+        endif
         let statusline = getbufvar('', '&statusline')
         call setbufvar('', '&statusline', prompt)
         redraw
         silent let choice = confirm("Select file to load:", choices, index + 1)
     finally
+        if has("gui_running")
+            call setbufvar('', '&guioptions', guioptions)
+        endif
         call setbufvar('', '&statusline', statusline)
     endtry
 
