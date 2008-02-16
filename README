@@ -1,0 +1,40 @@
+This is a mirror of http://www.vim.org/scripts/script.php?script_id=2157
+
+Screenshot: http://altfile.googlecode.com/files/shot1.png
+Project site: http://code.google.com/p/altfile/
+
+-----
+
+Suppose we have a project which resides in a "proj" directory. Content of that directory might look like this:
+
+  proj/classes/Class1.php
+  proj/classes/Class2.php
+  proj/classes/Namespace/Class3.php
+  proj/tpl/Class1.html
+  proj/tpl/Class2.html
+  proj/tpl/Namespace/Class3.html
+  proj/tests/Class1.phpt
+  proj/tests/Class2.phpt
+  proj/tests/Namespace/Class3.phpt
+
+Create "proj/.altfile" and put these lines inside:
+
+  class: classes/{MATCH}.php
+  template: tpl/{MATCH}.html
+  test: tests/{MATCH}.phpt
+
+Now load "proj/classes/Class1.php" and hit the hot key. Menu will
+appear:
+
+  class  [template]  test
+
+Now you can use it as any other wild menu: cursor keys, <CR>, <Esc>.
+
+By default previously active item is highilighted (works like Alt-Tab for Windows or Cmd-Tab for Mac OS X). So, to quickly switch between two files all you have to do is <M-Tab><CR>.
+
+Now load "proj/tpl/Class4.html" - it does not exist, and you'll get empty window. Hit <M-Tab>, select "class" and hit <CR> - VIM will create new buffer for (still non-existing) "proj/classes/Class4.php". Ta-dah! Actually, this is my main reason for creating this plugin.
+
+Note that it DOES NOT matter what is your current directory: you can cd to whatever place you want. But it DOES matter where ".altfile" is, becase patterns inside it are relative to its placement.
+
+To show visual file selector hit <F3>. Use movement/cursor keys to highlight a file; <CR> loads file; <Tab> switches between labels.
+
