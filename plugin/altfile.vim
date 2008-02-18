@@ -1,6 +1,4 @@
-" Title: AltFile 0.1b
-" Date: 2008-02-18
-" Author: Alex Kunin <alexkunin@gmail.com>
+" AltFile 0.1c by Alex Kunin <alexkunin@gmail.com>
 "
 "
 " PURPOSE
@@ -8,8 +6,16 @@
 " The plugin allows to switch easily between file.h/file.c,
 " main source/testcase, etc.
 "
+"
 " HISTORY
 " ===================================================================
+"
+" 2008-02-18    0.1c    Default choice now mimics Alt-Tab (Cmd-Tab
+"                       for Mac users), i.e. hitting the hot key
+"                       and then <CR> will cycle between last
+"                       two files. Visual adjustments: current
+"                       file is square brakets, and asterisk
+"                       indicates default choice.
 "
 " 2008-02-18    0.1b    If selected file is already visible
 "                       in some window, the script will
@@ -58,12 +64,13 @@
 " case; mode should be "normal"). In the status line you'll see
 " something like this:
 "
-"   *1) class   2) template   3) test
+"   1:[class]  *2: template   3: test
 "
 " Hit "2" to load "proj/tpl/Class1.html" or hit "3" to load
-" "proj/tests/Class1.phpt". To cancel switching hit "Enter" or "Ctrl-C".
+" "proj/tests/Class1.phpt". To cancel switching hit "Ctrl-C".
 " Hitting digit that corresponds to currently loaded file won't do
-" anything.
+" anything. Hitting "Enter" will switch to previously active
+" file (it's like Alt-Tab for Windows or Cmd-Tab for Mac OS X).
 "
 " Now load "proj/tpl/Class4.html" - it does not exist, and you'll get
 " empty window. Hit magic key and then select "1" - VIM will create
@@ -86,6 +93,7 @@
 
 let g:AltFile_CfgFile = '.altfile'
 let g:AltFile_MaxDepth = 16
+let g:AltFile_Previous = {}
 
 function AltFile()
     let cfgfile = ''
@@ -159,6 +167,17 @@ function AltFile()
         return
     endif
 
+    let current = index
+    let key = cfgfile . ' ' . match
+
+    if has_key(g:AltFile_Previous, key) && g:AltFile_Previous[key] != current
+        let default = g:AltFile_Previous[key]
+    else
+        let default = current + 1
+    endif
+
+    let default = default % len(filenames)
+
     let choices = ''
     let prompt = ''
     let i = 0
@@ -176,10 +195,17 @@ function AltFile()
         endif
 
         let choices = choices . '&' . (i + 1) . labels[i]
-        if i == index
-            let prompt = prompt . '*' . (i + 1) . ') ' . labels[i]
+
+        if i == default
+            let prompt = prompt . '*'
         else
-            let prompt = prompt . ' ' . (i + 1) . ') ' . labels[i]
+            let prompt = prompt . ' '
+        endif
+
+        if i == current
+            let prompt = prompt . (i + 1) . ':[' . labels[i] . ']'
+        else
+            let prompt = prompt . (i + 1) . ': ' . labels[i] . ' '
         endif
 
         let i = i + 1
@@ -193,7 +219,7 @@ function AltFile()
         let statusline = getbufvar('', '&statusline')
         call setbufvar('', '&statusline', prompt)
         redraw
-        silent let choice = confirm("Select file to load:", choices, index + 1)
+        silent let choice = confirm("Select file to load:", choices, default + 1)
     finally
         if has("gui_running")
             call setbufvar('', '&guioptions', guioptions)
@@ -201,7 +227,8 @@ function AltFile()
         call setbufvar('', '&statusline', statusline)
     endtry
 
-    if choice && choice != index + 1
+    if choice && choice - 1 != current
+        let g:AltFile_Previous[key] = current
         let filename = path . '/' . filenames[choice - 1]
         let bufno = bufnr(filename)
         if bufno != -1
