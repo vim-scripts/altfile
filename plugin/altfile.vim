@@ -1,4 +1,4 @@
-" AltFile 0.1c by Alex Kunin <alexkunin@gmail.com>
+" AltFile 0.1d by Alex Kunin <alexkunin@gmail.com>
 "
 "
 " PURPOSE
@@ -9,6 +9,11 @@
 "
 " HISTORY
 " ===================================================================
+"
+" 2008-02-19    0.1d    Now wildmenu is used as "engine",
+"                       so look & feel are much better now.
+"                       No more numeric shortcats, however.
+"                       Lots of code cleanup.
 "
 " 2008-02-18    0.1c    Default choice now mimics Alt-Tab (Cmd-Tab
 "                       for Mac users), i.e. hitting the hot key
@@ -30,12 +35,14 @@
 "
 " INSTALLATION
 " ===================================================================
-" Copy this file to your ~/.vim/plugin/folder. Bind some key to
-" AltFile(). Mine favorite so far is <Tab>:
+" Copy this file to your ~/.vim/plugin/ folder. Bind some key to
+" AltFile_ShowMenu():
 " 
-"   nmap <silent> <Tab> :call AltFile()<CR>
+"   nmap <expr> <M-Tab> AltFile_ShowMenu()
 "
-" Argument <silent> suppresses unneeded echo of the ":call".
+" Make sure that wildmenu is enabled:
+"
+"   set wildmenu
 "
 "
 " USAGE
@@ -60,26 +67,46 @@
 "   template: tpl/{MATCH}.html
 "   test: tests/{MATCH}.phpt
 "
-" Now load "proj/classes/Class1.php" and hit the magic key (<Tab> in my
-" case; mode should be "normal"). In the status line you'll see
-" something like this:
+" Now load "proj/classes/Class1.php" and hit the hot key. Menu will
+" appear:
 "
-"   1:[class]  *2: template   3: test
+"   class  [template]  test
 "
-" Hit "2" to load "proj/tpl/Class1.html" or hit "3" to load
-" "proj/tests/Class1.phpt". To cancel switching hit "Ctrl-C".
-" Hitting digit that corresponds to currently loaded file won't do
-" anything. Hitting "Enter" will switch to previously active
-" file (it's like Alt-Tab for Windows or Cmd-Tab for Mac OS X).
+" Now you can use it as any other wild menu: cursor keys, <CR>, <Esc>.
+"
+" By default previously active item is highilighted (works like Alt-Tab
+" for Windows or Cmd-Tab for Mac OS X). So, to quickly switch between
+" two files all you have to do is <M-Tab><CR>.
 "
 " Now load "proj/tpl/Class4.html" - it does not exist, and you'll get
-" empty window. Hit magic key and then select "1" - VIM will create
-" new buffer for (still non-existing) "proj/classes/Class4.php".
-" Ta-dah! Actually, this is the main reason for creating this plugin.
+" empty window. Hit <M-Tab>, select "class" and hit <CR> - VIM will
+" create new buffer for (still non-existing) "proj/classes/Class4.php".
+" Ta-dah! Actually, this is my main reason for creating this plugin.
 "
 " Note that it DOES NOT matter what is your current directory: you
 " can cd to whatever place you want. But it DOES matter where ".altfile"
 " is, becase patterns inside it are relative to its placement.
+"
+"
+" API
+" ===================================================================
+"
+" Functions:
+"
+"   AltFile_ShowMenu()      show the menu and highlight default
+"                           item (algorithm is similar to Alt-Tab
+"                           on Windows or Cmd-Tab on Mac OS X)
+"
+" Variables:
+"
+"   g:AltFile_CfgFile       name of the configuration file;
+"                           default is ".altfile"
+"
+" Commands:
+"
+"   :AltFile {label}        switch to another file; autocompletion
+"                           is available
+"
 "
 " FEEDBACK
 " ===================================================================
@@ -87,159 +114,188 @@
 " bug reports to the e-mail mentioned above. Ideas and suggestions
 " are welcome too.
 "
+"
 " LICENSE AND DISCLAIMER
 " ===================================================================
 " Free for whatever use. No warranties at all.
 
-let g:AltFile_CfgFile = '.altfile'
-let g:AltFile_MaxDepth = 16
-let g:AltFile_Previous = {}
+if !exists('g:AltFile_CfgFile')
+    let g:AltFile_CfgFile = '.altfile'
+endif
 
-function AltFile()
-    let cfgfile = ''
-    let patterns = []
-    let labels = []
-    let regexps = []
-    let filenames = []
+let s:previous = {}
 
-    let filename = expand("%:p")
-
-    let path = fnamemodify(filename, ':h')
-    let i = 0
-
-    while i < g:AltFile_MaxDepth
-        if filereadable(path . '/' . g:AltFile_CfgFile)
-            let cwd = getcwd()
-            execute 'lcd ' . path
-            let filename = expand("%:p:.")
-            execute 'lcd ' . cwd
-            let cfgfile = path . '/' . g:AltFile_CfgFile
-            break
-        endif
-
-        let path = simplify(path . '/..')
-        let i = i + 1
-    endwhile
+function! s:GetAltFiles(absfilename)
+    " Climbing up to find configuration file:
+    let cfgfile =
+        \ findfile(g:AltFile_CfgFile, fnamemodify(a:absfilename, ':h') . ';')
 
     if !filereadable(cfgfile)
-        echohl WarningMsg
-        echo 'Configuration file ' . g:AltFile_CfgFile . ' is not available.'
-        return
+        throw "Configuration file is not available."
     endif
 
-    let match = ''
-    let index = -1
+    " Checking if there is up-to-date cached result:
+    if exists('b:AltFile_Config') && b:AltFile_Config.timestamp >= getftime(cfgfile)
+        return b:AltFile_Config
+    endif
 
-    let lines = readfile(cfgfile)
-    let i = 0
+    " Resulting structure:
+    "   timestamp - modification time of the config file
+    "   basedir - absolute path of the project (config file is right here)
+    "   options - list of alternative files (see optionPrototype below)
+    "   selectedIndex - currently active file
+    "   match - {MATCH}-part of the filepath
+    let result =
+        \ {
+        \ 'timestamp':getftime(cfgfile),
+        \ 'basedir':fnamemodify(cfgfile, ':p:h'),
+        \ 'options':[],
+        \ 'selectedIndex':-1,
+        \ 'match':''
+        \ }
 
-    while i < len(lines)
-        let matches = matchlist(lines[i], '^\(\S\+\):\s\+\(.\+\)$')
+    " Prototype for items in result.options
+    "   label - readable label
+    "   pattern - pattern as defined in the config file
+    "   filename - pattern with {MATCH} replaced with result.match
+    let optionPrototype =
+        \ {
+        \ 'label':'',
+        \ 'pattern':'',
+        \ 'filename':''
+        \ }
+
+    " Some weird steps to find out relative path (relative to
+    " result.basedir):
+    let hadlocaldir = haslocaldir()
+    let cwd = getcwd()
+    execute 'lcd ' . result.basedir
+    let relfilename = fnamemodify(a:absfilename, ":p:.")
+    execute (hadlocaldir ? 'lcd' : 'cd') . ' ' . cwd
+
+    " Iterating through the config file:
+    for line in readfile(cfgfile)
+        " Preparing new option "object":
+        let option = copy(optionPrototype)
+
+        " Determining which of two forms is in use: "label: pattern" or
+        " just "pattern":
+        let matches = matchlist(line, '^\(\S\+\):\s\+\(.\+\)$')
 
         if len(matches)
-            let label = matches[1]
-            let pattern = matches[2]
+            let option.label = matches[1]
+            let option.pattern = matches[2]
         else
-            let label = lines[i]
-            let pattern = lines[i]
+            let option.label = line
+            let option.pattern = line
         endif
 
-        let regexp = '^' . substitute(substitute(pattern, '\(\/\|\.\)', '\\\1', 'g'), '{MATCH}', '\\(.\\+\\)', '') . '$'
+        " Trying to match this pattern (if previous patterns failed):
+        if result.selectedIndex == -1
+            " Constructing and applying regular expression ("{MATCH}" is
+            " converted to "(.+)", " rest of the pattern matches literally):
+            let matches = matchlist(
+                \ relfilename,
+                \ '^'
+                \ . substitute(
+                    \ escape(option.pattern, '/.'),
+                    \ '{MATCH}',
+                    \ '\\(.\\+\\)',
+                    \''
+                \ )
+                \ . '$')
 
-        if index == -1
-            let matches = matchlist(filename, regexp)
+            " If matched,
             if len(matches)
-                let index = i
-                let match = matches[1]
+                " storing option index
+                let result.selectedIndex = len(result.options)
+                " and actual value of {MATCH}
+                let result.match = matches[1]
             endif
         endif
 
-        call add(patterns, pattern)
-        call add(labels, label)
-        call add(regexps, regexp)
+        " Adding the option to the result
+        call add(result.options, option)
+    endfor
 
-        let i = i + 1
-    endwhile
-
-    if index == -1
-        echohl WarningMsg
-        echo 'No alternatives available.'
-        return
+    " If no pattern matched, then file has no known alternatives,
+    " and it's not our problem anymore.
+    if result.selectedIndex == -1
+        throw "No alternatives available."
     endif
 
-    let current = index
-    let key = cfgfile . ' ' . match
+    " Calculating actual alternative filenames by replacing {MATCH} with
+    " its actual value:
+    for i in range(len(result.options))
+        let result.options[i].filename =
+            \ substitute(result.options[i].pattern, '{MATCH}', result.match, '')
+    endfor
 
-    if has_key(g:AltFile_Previous, key) && g:AltFile_Previous[key] != current
-        let default = g:AltFile_Previous[key]
-    else
-        let default = current + 1
-    endif
+    " Caching...
+    let b:AltFile_Config = result
+    " ...and returning the result.
+    return result
+endfunction
 
-    let default = default % len(filenames)
+function! s:GetAltFilesForCurBuf()
+    return s:GetAltFiles(simplify(getcwd() . '/' . expand('%:p:.')))
+endfunction
 
-    let choices = ''
-    let prompt = ''
-    let i = 0
+function! s:CompletionCallback(ArgLead, CmdLine, CursorPos)
+    return map(copy(s:GetAltFilesForCurBuf().options), 'v:val.label')
+endfunction
 
-    while i < len(patterns)
-        call add(filenames, substitute(patterns[i], '{MATCH}', match, ''))
-
-        if patterns[i] == labels[i]
-            let labels[i] = filenames[i]
-        endif
-
-        if i
-            let choices = choices . "\n"
-            let prompt = prompt . '  '
-        endif
-
-        let choices = choices . '&' . (i + 1) . labels[i]
-
-        if i == default
-            let prompt = prompt . '*'
-        else
-            let prompt = prompt . ' '
-        endif
-
-        if i == current
-            let prompt = prompt . (i + 1) . ':[' . labels[i] . ']'
-        else
-            let prompt = prompt . (i + 1) . ': ' . labels[i] . ' '
-        endif
-
-        let i = i + 1
-    endwhile
-
+function! s:Switch(label)
     try
-        if has("gui_running")
-            let guioptions = getbufvar('', '&guioptions')
-            setlocal guioptions+=c
-        endif
-        let statusline = getbufvar('', '&statusline')
-        call setbufvar('', '&statusline', prompt)
-        redraw
-        silent let choice = confirm("Select file to load:", choices, default + 1)
-    finally
-        if has("gui_running")
-            call setbufvar('', '&guioptions', guioptions)
-        endif
-        call setbufvar('', '&statusline', statusline)
+        let alts = s:GetAltFilesForCurBuf()
+    catch
+        echohl WarningMsg
+        echo v:exception
+        return
     endtry
 
-    if choice && choice - 1 != current
-        let g:AltFile_Previous[key] = current
-        let filename = path . '/' . filenames[choice - 1]
-        let bufno = bufnr(filename)
-        if bufno != -1
-            let winno = bufwinnr(filename)
-            if winno != -1
-                execute winno . ' wincmd w'
+    for o in alts.options
+        if o.label == a:label
+            let key = alts.basedir . ' ' . alts.match
+            let s:previous[key] = alts.selectedIndex
+
+            let filename = simplify(alts.basedir . '/' . o.filename)
+            let bufno = bufnr(filename)
+            if bufno != -1
+                let winno = bufwinnr(filename)
+                if winno != -1
+                    execute winno . ' wincmd w'
+                else
+                    execute 'buffer ' . bufno
+                endif
             else
-                execute 'buffer ' . bufno
+                execute 'edit ' . filename
             endif
-        else
-            execute 'edit ' . filename
+            return
         endif
-    endif
+    endfor
 endfunction
+
+command!
+    \ -nargs=?
+    \ -complete=customlist,s:CompletionCallback
+    \ AltFile
+    \ call s:Switch('<args>')
+
+function! AltFile_ShowMenu()
+    try
+        let alts = s:GetAltFilesForCurBuf()
+        let key = alts.basedir . ' ' . alts.match
+        let index = has_key(s:previous, key) && s:previous[key] != alts.selectedIndex ? s:previous[key] : alts.selectedIndex + 1
+        return ':AltFile ' . join(map(range(0, index % len(alts.options)), 'nr2char(&wildcharm)'), '')
+    catch
+        echohl WarningMsg
+        echo v:exception
+        return ''
+    endtry
+endfunction
+
+" Defining Macro-aware wildchar (actual value does not matter):
+if !&wildcharm
+    set wildcharm=<C-Z>
+endif
