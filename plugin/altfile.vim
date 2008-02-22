@@ -1,14 +1,20 @@
-" AltFile 0.1d by Alex Kunin <alexkunin@gmail.com>
+" AltFile 0.1e by Alex Kunin <alexkunin@gmail.com>
 "
 "
 " PURPOSE
 " ===================================================================
+"
 " The plugin allows to switch easily between file.h/file.c,
 " main source/testcase, etc.
 "
 "
 " HISTORY
 " ===================================================================
+"
+" 2008-02-22    0.1e    Autoload support and "write-plugin"
+"                       guidelines (thanks to Thomas Link
+"                       for advices). Couple of minor bugs
+"                       fixed. Some "refactoring".
 "
 " 2008-02-19    0.1d    Now wildmenu is used as "engine",
 "                       so look & feel are much better now.
@@ -35,6 +41,7 @@
 "
 " INSTALLATION
 " ===================================================================
+"
 " Copy this file to your ~/.vim/plugin/ folder. Bind some key to
 " AltFile_ShowMenu():
 " 
@@ -97,6 +104,8 @@
 "                           item (algorithm is similar to Alt-Tab
 "                           on Windows or Cmd-Tab on Mac OS X)
 "
+"   altfile#ShowMenu()      autoloadable version of AltFile_ShowMenu()
+"
 " Variables:
 "
 "   g:AltFile_CfgFile       name of the configuration file;
@@ -104,7 +113,7 @@
 "
 " Commands:
 "
-"   :AltFile {label}        switch to another file; autocompletion
+"   :AltFile {handle}       switch to another file; autocompletion
 "                           is available
 "
 "
@@ -119,161 +128,153 @@
 " ===================================================================
 " Free for whatever use. No warranties at all.
 
+if exists('loaded_altfile')
+    finish
+endif
+
+let loaded_altfile = 1
+let s:save_cpo = &cpo
+set cpo&vim
+
 if !exists('g:AltFile_CfgFile')
     let g:AltFile_CfgFile = '.altfile'
 endif
 
 let s:previous = {}
 
-function! s:GetAltFiles(absfilename)
+" "Class" s:Mapper:
+"   basedir - absolute path of the project (config file is right here)
+"   mappings - list of s:Mapping instances
+"   current - currently active file
+"   match - {MATCH}-part of the filepath
+let s:Mapper =
+    \ {
+    \ 'basedir':'',
+    \ 'mappings':[],
+    \ 'selectedIndex':-1,
+    \ 'match':''
+    \ }
+
+function! s:Mapper.construct() dict
+    let absfilename = simplify(getcwd() . '/' . expand('%:p:.'))
+
     " Climbing up to find configuration file:
     let cfgfile =
-        \ findfile(g:AltFile_CfgFile, fnamemodify(a:absfilename, ':h') . ';')
+        \ findfile(g:AltFile_CfgFile, fnamemodify(absfilename, ':h') . ';')
 
     if !filereadable(cfgfile)
         throw "Configuration file is not available."
     endif
 
-    " Checking if there is up-to-date cached result:
-    if exists('b:AltFile_Config') && b:AltFile_Config.timestamp >= getftime(cfgfile)
-        return b:AltFile_Config
-    endif
+    let result = deepcopy(self)
+    let result.basedir = fnamemodify(cfgfile, ':p:h')
+    let result.mappings = map(readfile(cfgfile), 's:Mapping.construct(v:val)')
 
-    " Resulting structure:
-    "   timestamp - modification time of the config file
-    "   basedir - absolute path of the project (config file is right here)
-    "   options - list of alternative files (see optionPrototype below)
-    "   selectedIndex - currently active file
-    "   match - {MATCH}-part of the filepath
-    let result =
-        \ {
-        \ 'timestamp':getftime(cfgfile),
-        \ 'basedir':fnamemodify(cfgfile, ':p:h'),
-        \ 'options':[],
-        \ 'selectedIndex':-1,
-        \ 'match':''
-        \ }
-
-    " Prototype for items in result.options
-    "   label - readable label
-    "   pattern - pattern as defined in the config file
-    "   filename - pattern with {MATCH} replaced with result.match
-    let optionPrototype =
-        \ {
-        \ 'label':'',
-        \ 'pattern':'',
-        \ 'filename':''
-        \ }
-
-    " Some weird steps to find out relative path (relative to
+    " Some weird but working steps to find out relative path (relative to
     " result.basedir):
     let hadlocaldir = haslocaldir()
     let cwd = getcwd()
     execute 'lcd ' . result.basedir
-    let relfilename = fnamemodify(a:absfilename, ":p:.")
+    let relfilename = fnamemodify(absfilename, ":p:.")
     execute (hadlocaldir ? 'lcd' : 'cd') . ' ' . cwd
 
-    " Iterating through the config file:
-    for line in readfile(cfgfile)
-        " Preparing new option "object":
-        let option = copy(optionPrototype)
-
-        " Determining which of two forms is in use: "label: pattern" or
-        " just "pattern":
-        let matches = matchlist(line, '^\(\S\+\):\s\+\(.\+\)$')
+    for i in range(len(result.mappings))
+        " Constructing and applying regular expression ("{MATCH}" is
+        " converted to "(.+)", rest of the pattern matches literally):
+        let matches = matchlist(
+            \ relfilename,
+            \ '^'
+            \ . substitute(
+                \ escape(result.mappings[i].pattern, '/.'),
+                \ '{MATCH}',
+                \ '\\(.\\+\\)',
+                \''
+            \ )
+            \ . '$')
 
         if len(matches)
-            let option.label = matches[1]
-            let option.pattern = matches[2]
-        else
-            let option.label = line
-            let option.pattern = line
+            let result.match = matches[1]
+            let result.selectedIndex = i
+            break
         endif
-
-        " Trying to match this pattern (if previous patterns failed):
-        if result.selectedIndex == -1
-            " Constructing and applying regular expression ("{MATCH}" is
-            " converted to "(.+)", " rest of the pattern matches literally):
-            let matches = matchlist(
-                \ relfilename,
-                \ '^'
-                \ . substitute(
-                    \ escape(option.pattern, '/.'),
-                    \ '{MATCH}',
-                    \ '\\(.\\+\\)',
-                    \''
-                \ )
-                \ . '$')
-
-            " If matched,
-            if len(matches)
-                " storing option index
-                let result.selectedIndex = len(result.options)
-                " and actual value of {MATCH}
-                let result.match = matches[1]
-            endif
-        endif
-
-        " Adding the option to the result
-        call add(result.options, option)
     endfor
 
-    " If no pattern matched, then file has no known alternatives,
-    " and it's not our problem anymore.
     if result.selectedIndex == -1
         throw "No alternatives available."
     endif
 
     " Calculating actual alternative filenames by replacing {MATCH} with
     " its actual value:
-    for i in range(len(result.options))
-        let result.options[i].filename =
-            \ substitute(result.options[i].pattern, '{MATCH}', result.match, '')
+    for l:mapping in result.mappings
+        let l:mapping.filename =
+            \ substitute(l:mapping.pattern, '{MATCH}', result.match, '')
     endfor
 
-    " Caching...
-    let b:AltFile_Config = result
-    " ...and returning the result.
     return result
 endfunction
 
-function! s:GetAltFilesForCurBuf()
-    return s:GetAltFiles(simplify(getcwd() . '/' . expand('%:p:.')))
+function! s:Mapper.getPreviouslySelectedIndex() dict
+    let key = self.basedir . ' ' . self.match
+    return (has_key(s:previous, key) && s:previous[key] != self.selectedIndex ? s:previous[key] : self.selectedIndex + 1) % len(self.mappings)
+endfunction
+
+function! s:Mapper.setCurrentHandle(handle) dict
+    let l:mapping = get(filter(copy(self.mappings), 'v:val.handle == a:handle'), 0, {})
+
+    if l:mapping != {}
+        let l:filename = simplify(self.basedir . '/' . l:mapping.filename)
+        let s:previous[self.basedir . ' ' . self.match] = self.selectedIndex
+        let l:bufno = bufnr(l:filename)
+        if l:bufno != -1
+            let l:winno = bufwinnr(l:filename)
+            execute l:winno != -1 ? l:winno . ' wincmd w' : 'buffer ' . l:bufno
+        else
+            execute 'edit ' . l:filename
+        endif
+    endif
+endfunction
+
+" "Class" s:Mapping:
+"   handle - human-readable label
+"   pattern - pattern as defined in the config file
+"   filename - pattern with {MATCH} replaced with result.match
+let s:Mapping =
+    \ {
+    \ 'handle':'',
+    \ 'pattern':'',
+    \ 'filename':''
+    \ }
+
+function! s:Mapping.construct(cfgline) dict
+    let result = deepcopy(self)
+
+    " Determining which of two forms is in use: "handle: pattern" or
+    " just "pattern":
+    let matches = matchlist(a:cfgline, '^\(\S\+\):\s\+\(.\+\)$')
+
+    if len(matches)
+        let result.handle = matches[1]
+        let result.pattern = matches[2]
+    else
+        let result.handle = a:cfgline
+        let result.pattern = a:cfgline
+    endif
+
+    return result
 endfunction
 
 function! s:CompletionCallback(ArgLead, CmdLine, CursorPos)
-    return map(copy(s:GetAltFilesForCurBuf().options), 'v:val.label')
+    return map(copy(s:Mapper.construct().mappings), 'v:val.handle')
 endfunction
 
-function! s:Switch(label)
+function! s:Switch(handle)
     try
-        let alts = s:GetAltFilesForCurBuf()
+        call s:Mapper.construct().setCurrentHandle(a:handle)
     catch
         echohl WarningMsg
         echo v:exception
         return
     endtry
-
-    for o in alts.options
-        if o.label == a:label
-            let key = alts.basedir . ' ' . alts.match
-            let s:previous[key] = alts.selectedIndex
-
-            let filename = simplify(alts.basedir . '/' . o.filename)
-            let bufno = bufnr(filename)
-            if bufno != -1
-                let winno = bufwinnr(filename)
-                if winno != -1
-                    execute winno . ' wincmd w'
-                else
-                    execute 'buffer ' . bufno
-                endif
-            else
-                execute 'edit ' . filename
-            endif
-            return
-        endif
-    endfor
 endfunction
 
 command!
@@ -284,10 +285,12 @@ command!
 
 function! AltFile_ShowMenu()
     try
-        let alts = s:GetAltFilesForCurBuf()
-        let key = alts.basedir . ' ' . alts.match
-        let index = has_key(s:previous, key) && s:previous[key] != alts.selectedIndex ? s:previous[key] : alts.selectedIndex + 1
-        return ':AltFile ' . join(map(range(0, index % len(alts.options)), 'nr2char(&wildcharm)'), '')
+        let index = s:Mapper.construct().getPreviouslySelectedIndex()
+        " Defining macro-aware wildchar (actual value does not matter):
+        if !&wildcharm
+            set wildcharm=<C-Z>
+        endif
+        return ':AltFile ' . repeat(nr2char(&wildcharm), index + 1)
     catch
         echohl WarningMsg
         echo v:exception
@@ -295,7 +298,8 @@ function! AltFile_ShowMenu()
     endtry
 endfunction
 
-" Defining Macro-aware wildchar (actual value does not matter):
-if !&wildcharm
-    set wildcharm=<C-Z>
-endif
+function! altfile#ShowMenu()
+    return AltFile_ShowMenu()
+endfunction
+
+let &cpo = s:save_cpo
