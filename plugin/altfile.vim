@@ -1,4 +1,4 @@
-" AltFile 0.1e by Alex Kunin <alexkunin@gmail.com>
+" AltFile 0.2 by Alex Kunin <alexkunin@gmail.com>
 "
 "
 " PURPOSE
@@ -10,6 +10,11 @@
 "
 " HISTORY
 " ===================================================================
+"
+" 2008-02-26    0.2     Added visual file selector (resembles
+"                       BufExplorer; also, some tricks were
+"                       borrowed from source code of that really
+"                       nice script).
 "
 " 2008-02-22    0.1e    Autoload support and "write-plugin"
 "                       guidelines (thanks to Thomas Link
@@ -43,9 +48,10 @@
 " ===================================================================
 "
 " Copy this file to your ~/.vim/plugin/ folder. Bind some key to
-" AltFile_ShowMenu():
+" AltFile_ShowMenu() and AltFile_ShowSelector():
 " 
 "   nmap <expr> <M-Tab> AltFile_ShowMenu()
+"   nmap <F3> :call AltFile_ShowSelector()<CR>
 "
 " Make sure that wildmenu is enabled:
 "
@@ -94,6 +100,9 @@
 " can cd to whatever place you want. But it DOES matter where ".altfile"
 " is, becase patterns inside it are relative to its placement.
 "
+" To show visual file selector hit <F3>. Use movement/cursor keys to
+" highlight a file; <CR> loads file; <Tab> switches between labels.
+"
 "
 " API
 " ===================================================================
@@ -104,7 +113,11 @@
 "                           item (algorithm is similar to Alt-Tab
 "                           on Windows or Cmd-Tab on Mac OS X)
 "
+"   AltFile_ShowSelector()  show visual file selector
+"
 "   altfile#ShowMenu()      autoloadable version of AltFile_ShowMenu()
+"
+"   altfile#ShowSelector()  autoloadable version of AltFile_ShowSelector()
 "
 " Variables:
 "
@@ -178,14 +191,33 @@ function! s:Mapper.construct() dict
     let relfilename = fnamemodify(absfilename, ":p:.")
     execute (hadlocaldir ? 'lcd' : 'cd') . ' ' . cwd
 
-    for i in range(len(result.mappings))
+    let l:matches = result.matchRelFilename(relfilename)
+
+    if empty(l:matches)
+        throw "No alternatives available."
+    endif
+
+    let result.match = l:matches.match
+    let result.selectedIndex = l:matches.index
+
+    " Calculating actual alternative filenames by replacing {MATCH} with
+    " its actual value:
+    for l:mapping in result.mappings
+        let l:mapping.filename = l:mapping.expand(result.match)
+    endfor
+
+    return result
+endfunction
+
+function! s:Mapper.matchRelFilename(filename) dict
+    for i in range(len(self.mappings))
         " Constructing and applying regular expression ("{MATCH}" is
         " converted to "(.+)", rest of the pattern matches literally):
         let matches = matchlist(
-            \ relfilename,
+            \ a:filename,
             \ '^'
             \ . substitute(
-                \ escape(result.mappings[i].pattern, '/.'),
+                \ escape(self.mappings[i].pattern, '/.'),
                 \ '{MATCH}',
                 \ '\\(.\\+\\)',
                 \''
@@ -193,24 +225,11 @@ function! s:Mapper.construct() dict
             \ . '$')
 
         if len(matches)
-            let result.match = matches[1]
-            let result.selectedIndex = i
-            break
+            return { 'match':matches[1], 'label':'', 'index':i }
         endif
     endfor
 
-    if result.selectedIndex == -1
-        throw "No alternatives available."
-    endif
-
-    " Calculating actual alternative filenames by replacing {MATCH} with
-    " its actual value:
-    for l:mapping in result.mappings
-        let l:mapping.filename =
-            \ substitute(l:mapping.pattern, '{MATCH}', result.match, '')
-    endfor
-
-    return result
+    return {}
 endfunction
 
 function! s:Mapper.getPreviouslySelectedIndex() dict
@@ -263,6 +282,10 @@ function! s:Mapping.construct(cfgline) dict
     return result
 endfunction
 
+function! s:Mapping.expand(match)
+    return substitute(self.pattern, '{MATCH}', a:match, '')
+endfunction
+
 function! s:CompletionCallback(ArgLead, CmdLine, CursorPos)
     return map(copy(s:Mapper.construct().mappings), 'v:val.handle')
 endfunction
@@ -298,8 +321,137 @@ function! AltFile_ShowMenu()
     endtry
 endfunction
 
+function! AltFile_ShowSelector()
+    let hadlocaldir = haslocaldir()
+    let cwd = getcwd()
+
+    "try
+        let l:mapper = s:Mapper.construct()
+        let l:files = filter(split(globpath(l:mapper.basedir, '**'), "\n"), '!isdirectory(v:val)')
+        let l:items = {}
+
+        execute 'lcd ' . l:mapper.basedir
+
+        for l:file in l:files
+            let relfilename = fnamemodify(l:file, ":p:.")
+            let l:matches = l:mapper.matchRelFilename(relfilename)
+
+            if !empty(l:matches)
+                if !has_key(l:items, l:matches.match)
+                    let l:items[l:matches.match] = []
+                endif
+                call add(l:items[l:matches.match], l:mapper.mappings[l:matches.index].handle)
+            endif
+        endfor
+    "catch
+    "    echohl WarningMsg
+    "    echo v:exception
+    "    return
+    "finally
+        execute (hadlocaldir ? 'lcd' : 'cd') . ' ' . cwd
+    "endtry
+
+    drop [AltFile]
+
+    execute 'lcd ' . l:mapper.basedir
+
+    let b:mapper = l:mapper
+    let b:items = l:items
+    let b:selectedIndex = l:mapper.selectedIndex
+
+    nmap <buffer> <silent> <Tab> :call <SID>NextTab()<CR>
+    nmap <buffer> <silent> <S-Tab> :call <SID>PreviousTab()<CR>
+    nmap <buffer> <silent> <CR> :call <SID>SwitchToSelectedFile()<CR>
+
+    call s:RenderSelector(1)
+endfunction
+
+function! s:SwitchToSelectedFile()
+    if line('.') > 2
+        execute 'drop ' . getline('.')[4:]
+    endif
+endfunction
+
+function! s:NextTab()
+    let b:selectedIndex = (b:selectedIndex + 1) % len(b:mapper.mappings)
+    call s:RenderSelector()
+endfunction
+
+function! s:PreviousTab()
+    let b:selectedIndex = (b:selectedIndex - 1 + len(b:mapper.mappings)) % len(b:mapper.mappings)
+    call s:RenderSelector()
+endfunction
+
+function! s:RenderSelector(...)
+    setlocal bufhidden=delete
+    setlocal buftype=nofile
+    setlocal modifiable
+    setlocal noswapfile
+    setlocal nowrap
+    setlocal cursorline
+
+    highlight link AltFile_LabelSel Cursor
+    highlight link AltFile_Label Normal
+
+    syntax clear
+
+    syntax match Normal /^Alternatives: .*$/ contains=AltFile_Label,AltFile_LabelSel
+    syntax match AltFile_Label / \w\+ / contained
+    syntax match AltFile_LabelSel /\[\w\+\]/ contained
+
+    syntax match Normal /^  .*$/
+    syntax match Identifier /^ [bw].*$/
+    syntax match Special /^ ?.*$/
+
+    let l:moveCurcor = a:0 && a:1
+
+    if !l:moveCurcor
+        let l:pos = getpos(".")
+    endif
+
+    %delete
+
+    let l:current = b:mapper.mappings[b:selectedIndex].handle
+
+    call setline(1, 'Alternatives: ' . join(map(copy(b:mapper.mappings), 'v:val.handle == l:current ? "[" . v:val.handle . "]" : " " . v:val.handle . " "'), ''))
+    call setline(2, '')
+
+    for l:match in sort(keys(b:items))
+        let relfilename = b:mapper.mappings[b:selectedIndex].expand(l:match)
+        let absfilename = b:mapper.basedir . '/' . relfilename
+        let s:line = ' '
+        
+        if bufnr(absfilename) != -1
+            let s:line .= (bufwinnr(absfilename) != -1 ? 'w' : 'b') .
+                \ (getbufvar(absfilename, '&modified') ? '+' : ' ')
+        elseif !filereadable(absfilename)
+            let s:line .= '? '
+        else
+            let s:line .= '  '
+        endif
+
+        let s:line .= ' ' . relfilename
+
+        call append(line('$'), s:line)
+
+        if l:moveCurcor && b:mapper.match == l:match
+            call cursor('$', 5)
+        endif
+    endfor
+
+    if !l:moveCurcor
+        call setpos('.', l:pos)
+    endif
+
+    setlocal modifiable!
+endfunction
+
 function! altfile#ShowMenu()
     return AltFile_ShowMenu()
+endfunction
+
+function! altfile#ShowSelector()
+    return AltFile_ShowSelector()
 endfunction
 
 let &cpo = s:save_cpo
